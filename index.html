@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>영문 계약서 번역기 | Hyundai Pharm BD</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --navy: #0f2744;
+  --blue: #3b82f6;
+  --blue-light: #93c5fd;
+  --accent: #10b981;
+  --accent-dark: #059669;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --white: #ffffff;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Noto Sans KR', sans-serif;
+  background: linear-gradient(135deg, #0a1f3c 0%, #0f2f56 50%, #091a30 100%);
+  min-height: 100vh;
+  color: var(--white);
+  padding: 32px 16px 48px;
+}
+
+.container { max-width: 740px; margin: 0 auto; }
+
+/* ── Header ── */
+.header { text-align: center; margin-bottom: 36px; }
+.header-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3);
+  border-radius: 20px; padding: 5px 16px; font-size: 11px; font-weight: 500;
+  color: var(--blue-light); margin-bottom: 14px; letter-spacing: 0.8px; text-transform: uppercase;
+}
+.header h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 8px; }
+.header p  { font-size: 13px; color: rgba(255,255,255,0.45); font-weight: 300; line-height: 1.7; }
+
+/* ── Card ── */
+.card {
+  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 16px; padding: 22px; margin-bottom: 14px; backdrop-filter: blur(12px);
+}
+.section-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase;
+  color: var(--blue-light); margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
+}
+.section-label::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.07); }
+
+/* ── Mode Selector ── */
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mode-card {
+  border: 2px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 16px 14px;
+  cursor: pointer; transition: all 0.2s; background: rgba(0,0,0,0.15); text-align: left;
+  position: relative;
+}
+.mode-card:hover { border-color: rgba(59,130,246,0.4); background: rgba(59,130,246,0.06); }
+.mode-card.selected {
+  border-color: var(--blue); background: rgba(59,130,246,0.12);
+  box-shadow: 0 0 0 1px rgba(59,130,246,0.3);
+}
+.mode-card input[type=radio] { display: none; }
+.mode-icon { font-size: 22px; margin-bottom: 8px; display: block; }
+.mode-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.mode-desc  { font-size: 11px; color: rgba(255,255,255,0.45); line-height: 1.5; }
+.mode-badge {
+  position: absolute; top: 10px; right: 10px;
+  font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 10px; letter-spacing: 0.5px;
+}
+.badge-full  { background: rgba(59,130,246,0.2);  color: var(--blue-light); }
+.badge-check { background: rgba(16,185,129,0.2); color: #6ee7b7; }
+
+/* ── Access Code ── */
+.access-wrap { display: none; }
+.access-wrap.visible { display: block; }
+.input-label { font-size: 11px; color: rgba(255,255,255,0.4); margin-bottom: 6px; padding-left: 2px; }
+.input-row { position: relative; }
+.input-row input {
+  width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px; padding: 11px 44px 11px 14px; font-family: inherit; font-size: 13px;
+  color: var(--white); outline: none; transition: border-color 0.2s;
+  -webkit-appearance: none;
+}
+.input-row input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+.input-row input::placeholder { color: rgba(255,255,255,0.2); }
+.eye-btn {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer; color: rgba(255,255,255,0.3);
+  font-size: 16px; padding: 4px; transition: color 0.2s;
+}
+.eye-btn:hover { color: rgba(255,255,255,0.7); }
+.save-badge {
+  font-size: 10px; color: var(--accent); opacity: 0; transition: opacity 0.4s;
+  margin-left: 8px; font-weight: 500;
+}
+.save-badge.show { opacity: 1; }
+.hint { font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 7px; padding-left: 2px; line-height: 1.5; }
+
+/* ── Drop Zone ── */
+.drop-zone {
+  border: 2px dashed rgba(255,255,255,0.15); border-radius: 12px; padding: 34px 20px;
+  text-align: center; cursor: pointer; transition: all 0.25s;
+  background: rgba(0,0,0,0.15); user-select: none;
+}
+.drop-zone:hover, .drop-zone.drag { border-color: var(--blue); background: rgba(59,130,246,0.07); }
+.drop-zone.has-file { border-color: var(--accent); background: rgba(16,185,129,0.06); }
+.drop-icon  { font-size: 38px; margin-bottom: 8px; display: block; opacity: 0.7; }
+.drop-title { font-size: 14px; font-weight: 500; margin-bottom: 4px; color: rgba(255,255,255,0.85); }
+.drop-sub   { font-size: 12px; color: rgba(255,255,255,0.35); }
+.file-pill  {
+  display: inline-flex; align-items: center; gap: 10px; margin-top: 12px;
+  background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.25);
+  border-radius: 8px; padding: 9px 14px;
+}
+.file-name  { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--accent); font-weight: 500; word-break: break-all; }
+.file-size  { font-size: 11px; color: rgba(255,255,255,0.35); white-space: nowrap; }
+.file-rm    { background: none; border: none; color: rgba(255,255,255,0.25); cursor: pointer; font-size: 14px; padding: 0 2px; transition: color 0.2s; flex-shrink: 0; }
+.file-rm:hover { color: var(--red); }
+#file-input { display: none; }
+
+/* ── Process Button ── */
+.run-btn {
+  width: 100%; padding: 17px; border: none; border-radius: 12px;
+  font-family: inherit; font-size: 15px; font-weight: 700; cursor: pointer; transition: all 0.2s;
+}
+.run-btn.ready   { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; box-shadow: 0 4px 20px rgba(37,99,235,0.4); }
+.run-btn.ready:hover { transform: translateY(-1px); box-shadow: 0 6px 28px rgba(37,99,235,0.5); }
+.run-btn.busy    { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.3); cursor: not-allowed; border: 1px solid rgba(255,255,255,0.07); }
+.run-btn.done    { background: linear-gradient(135deg, var(--accent-dark), #047857); color: white; box-shadow: 0 4px 20px rgba(16,185,129,0.3); }
+.run-btn.done:hover { transform: translateY(-1px); }
+
+/* ── Progress bar ── */
+.prog-wrap { display: none; margin-top: 12px; background: rgba(0,0,0,0.2); border-radius: 4px; height: 4px; overflow: hidden; }
+.prog-wrap.show { display: block; }
+.prog-bar { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--blue), var(--accent)); animation: prog 2.5s ease-in-out infinite; }
+@keyframes prog { 0%{width:6%} 50%{width:78%} 100%{width:6%} }
+
+/* ── Log Console ── */
+.console-wrap { display: none; margin-top: 14px; }
+.console-wrap.show { display: block; }
+.console-header {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: rgba(255,255,255,0.3); margin-bottom: 6px;
+}
+.console {
+  background: #070f1c; border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px; padding: 14px 16px; height: 210px; overflow-y: auto;
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.7;
+}
+.console::-webkit-scrollbar { width: 5px; }
+.console::-webkit-scrollbar-track { background: transparent; }
+.console::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+.log-info  { color: rgba(200,220,255,0.75); }
+.log-warn  { color: #fcd34d; }
+.log-error { color: #fca5a5; }
+
+/* ── Download button ── */
+.dl-btn {
+  display: none; width: 100%; margin-top: 12px; padding: 14px; border: none; border-radius: 12px;
+  font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; transition: all 0.2s;
+  background: linear-gradient(135deg, #0e7490, #0891b2); color: white;
+  box-shadow: 0 4px 16px rgba(8,145,178,0.35);
+}
+.dl-btn.show { display: block; }
+.dl-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 22px rgba(8,145,178,0.45); }
+
+/* ── Warn note ── */
+.warn-note {
+  display: flex; gap: 10px; padding: 12px 16px;
+  background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.18);
+  border-radius: 10px; font-size: 11.5px; color: rgba(255,213,130,0.75); line-height: 1.6; margin-top: 14px;
+}
+.footer { text-align: center; margin-top: 24px; font-size: 11px; color: rgba(255,255,255,0.18); line-height: 1.9; }
+.footer a { color: rgba(255,255,255,0.27); text-decoration: none; }
+
+@media (max-width: 480px) {
+  .mode-grid { grid-template-columns: 1fr; }
+  body { padding: 20px 12px 40px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-badge">📋 Hyundai Pharm BD · AI 계약 분석</div>
+    <h1>영문 계약서 번역기</h1>
+    <p>PDF 또는 Word 파일을 업로드하면 Claude AI가 분석하여<br>한국어 번역 또는 핵심 조항 요약을 엑셀로 저장합니다</p>
+  </div>
+
+  <!-- 번역 모드 선택 -->
+  <div class="card">
+    <div class="section-label">Step 1 — 번역 모드 선택</div>
+    <div class="mode-grid">
+      <label class="mode-card selected" id="mode-full-card">
+        <input type="radio" name="mode" value="full" checked id="mode-full">
+        <span class="mode-icon">📄</span>
+        <span class="mode-badge badge-full">전체</span>
+        <div class="mode-title">전체 번역</div>
+        <div class="mode-desc">모든 조항을 원문 그대로 번역<br>조항·원문·한국어 3열 표 형식</div>
+      </label>
+      <label class="mode-card" id="mode-check-card">
+        <input type="radio" name="mode" value="check" id="mode-check">
+        <span class="mode-icon">🔍</span>
+        <span class="mode-badge badge-check">빠른</span>
+        <div class="mode-title">핵심 조항 확인</div>
+        <div class="mode-desc">계약기간·갱신·해지 조항 집중 추출<br>분류·항목·조항번호·원문·한국어</div>
+      </label>
+    </div>
+  </div>
+
+  <!-- 출력 형식 선택 -->
+  <div class="card">
+    <div class="section-label">Step 2 — 출력 형식 선택</div>
+    <div class="mode-grid">
+      <label class="mode-card selected" id="fmt-excel-card">
+        <input type="radio" name="fmt" value="excel" checked id="fmt-excel">
+        <span class="mode-icon">📊</span>
+        <span class="mode-badge badge-full">XLSX</span>
+        <div class="mode-title">Excel 파일</div>
+        <div class="mode-desc">필터·정렬 가능한 스프레드시트<br>색상 서식·고정 헤더 포함</div>
+      </label>
+      <label class="mode-card" id="fmt-word-card">
+        <input type="radio" name="fmt" value="word" id="fmt-word">
+        <span class="mode-icon">📝</span>
+        <span class="mode-badge badge-check">DOCX</span>
+        <div class="mode-title">Word 파일</div>
+        <div class="mode-desc">가로 방향 A4 표 형식<br>인쇄·공유에 최적화</div>
+      </label>
+    </div>
+  </div>
+
+  <!-- 접근 코드 (서버 설정 시 자동 표시) -->
+  <div class="card access-wrap" id="access-wrap">
+    <div class="section-label">접근 코드</div>
+    <div class="input-label">관리자로부터 제공받은 접근 코드</div>
+    <div class="input-row">
+      <input type="password" id="access-code" placeholder="접근 코드 입력"
+             autocomplete="off" spellcheck="false">
+      <button class="eye-btn" onclick="toggleCode()" id="eye-btn">👁</button>
+    </div>
+    <div class="hint">입력값은 이 브라우저에만 저장됩니다
+      <span class="save-badge" id="save-badge">✓ 저장됨</span>
+    </div>
+  </div>
+
+  <!-- 파일 업로드 -->
+  <div class="card">
+    <div class="section-label">Step 3 — 계약서 업로드</div>
+    <div class="drop-zone" id="drop-zone"
+         ondrop="onDrop(event)" ondragover="onDragOver(event)"
+         ondragleave="onDragLeave(event)" onclick="clickUpload()">
+      <span class="drop-icon">📋</span>
+      <div class="drop-title">파일을 드래그하거나 클릭하여 업로드</div>
+      <div class="drop-sub">PDF · DOCX 지원 &nbsp;|&nbsp; 최대 50MB</div>
+    </div>
+    <input type="file" id="file-input" accept=".pdf,.docx" onchange="onFileInput(event)">
+  </div>
+
+  <!-- 실행 버튼 -->
+  <button class="run-btn ready" id="run-btn" onclick="startTranslation()">
+    🚀 &nbsp; 번역 시작
+  </button>
+  <div class="prog-wrap" id="prog-wrap"><div class="prog-bar"></div></div>
+
+  <!-- 진행 콘솔 -->
+  <div class="console-wrap" id="console-wrap">
+    <div class="console-header">
+      <span>진행 상황 로그</span>
+      <span id="console-status"></span>
+    </div>
+    <div class="console" id="console"></div>
+  </div>
+
+  <!-- 다운로드 버튼 -->
+  <button class="dl-btn" id="dl-btn" onclick="downloadFile()">
+    ⬇️ &nbsp; Excel 파일 다운로드
+  </button>
+
+  <div class="warn-note">
+    <span>⚠️</span>
+    <span>AI 번역 결과는 참고용입니다. 법적 효력이 있는 문서로 사용하기 전 원문과 반드시 대조·검토하시기 바랍니다.</span>
+  </div>
+
+  <div class="footer">
+    Powered by <a href="https://www.anthropic.com" target="_blank">Anthropic Claude API</a>
+    &nbsp;·&nbsp; Hyundai Pharm BD
+  </div>
+</div>
+
+<script>
+'use strict';
+
+let selectedFile = null;
+let currentJobId = null;
+let saveTimer = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  // 서버에서 접근코드 필요 여부 확인
+  fetch('/health')
+    .then(r => r.json())
+    .then(d => {
+      if (d.requiresCode) {
+        document.getElementById('access-wrap').classList.add('visible');
+        const saved = localStorage.getItem('hd_access_code');
+        if (saved) document.getElementById('access-code').value = saved;
+        document.getElementById('access-code').addEventListener('change', saveCode);
+      }
+    }).catch(() => {});
+
+  // 모드·형식 카드 클릭 처리
+  document.querySelectorAll('.mode-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const grp = card.querySelector('input[type=radio]').name;
+      document.querySelectorAll(`.mode-card input[name="${grp}"]`).forEach(inp => {
+        inp.closest('.mode-card').classList.remove('selected');
+      });
+      card.classList.add('selected');
+      card.querySelector('input[type=radio]').checked = true;
+    });
+  });
+});
+
+// ── Access Code ───────────────────────────────────────────────────────────────
+function toggleCode() {
+  const inp = document.getElementById('access-code');
+  const btn = document.getElementById('eye-btn');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? '👁' : '🙈';
+}
+function saveCode() {
+  const v = document.getElementById('access-code').value.trim();
+  if (v) localStorage.setItem('hd_access_code', v);
+  clearTimeout(saveTimer);
+  const b = document.getElementById('save-badge');
+  b.classList.add('show');
+  saveTimer = setTimeout(() => b.classList.remove('show'), 2000);
+}
+
+// ── File Handling ─────────────────────────────────────────────────────────────
+function clickUpload() { if (!selectedFile) document.getElementById('file-input').click(); }
+function onDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('drag'); }
+function onDragLeave()  { document.getElementById('drop-zone').classList.remove('drag'); }
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('drag');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+}
+function onFileInput(e) { if (e.target.files[0]) setFile(e.target.files[0]); }
+
+function setFile(f) {
+  const ext = f.name.split('.').pop().toLowerCase();
+  if (!['pdf','docx'].includes(ext)) {
+    logMsg('❌ PDF 또는 DOCX 파일만 지원합니다.', 'error'); return;
+  }
+  selectedFile = f;
+  const size = f.size < 1024*1024 ? `${(f.size/1024).toFixed(0)} KB` : `${(f.size/1024/1024).toFixed(1)} MB`;
+  const dz = document.getElementById('drop-zone');
+  dz.className = 'drop-zone has-file';
+  dz.onclick = (e) => { if (!e.target.classList.contains('file-rm')) document.getElementById('file-input').click(); };
+  dz.innerHTML = `
+    <span class="drop-icon">${ext==='pdf'?'📄':'📝'}</span>
+    <div class="drop-title">파일이 준비되었습니다</div>
+    <div class="drop-sub">클릭하면 교체할 수 있습니다</div>
+    <div class="file-pill">
+      <span class="file-name">${esc(f.name)}</span>
+      <span class="file-size">${size}</span>
+      <button class="file-rm" onclick="removeFile(event)">✕</button>
+    </div>`;
+}
+function removeFile(e) {
+  e.stopPropagation();
+  selectedFile = null;
+  const dz = document.getElementById('drop-zone');
+  dz.className = 'drop-zone'; dz.onclick = clickUpload;
+  dz.innerHTML = `<span class="drop-icon">📋</span><div class="drop-title">파일을 드래그하거나 클릭하여 업로드</div><div class="drop-sub">PDF · DOCX 지원 &nbsp;|&nbsp; 최대 50MB</div>`;
+  document.getElementById('file-input').value = '';
+}
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Console Log ───────────────────────────────────────────────────────────────
+function logMsg(text, level = 'info') {
+  const con = document.getElementById('console');
+  const line = document.createElement('div');
+  line.className = `log-${level}`;
+  const ts = new Date().toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  line.textContent = `[${ts}] ${text}`;
+  con.appendChild(line);
+  con.scrollTop = con.scrollHeight;
+}
+
+// ── Main Flow ─────────────────────────────────────────────────────────────────
+async function startTranslation() {
+  if (document.getElementById('run-btn').classList.contains('busy')) return;
+  if (!selectedFile) { logMsg('❌ 파일을 먼저 업로드해주세요.', 'error'); showConsole(); return; }
+
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const fmt  = document.querySelector('input[name=fmt]:checked').value;
+  const accessCode = document.getElementById('access-code')?.value?.trim() || '';
+
+  // UI 초기화
+  document.getElementById('console').innerHTML = '';
+  document.getElementById('dl-btn').classList.remove('show');
+  currentJobId = null;
+  setBusy(true);
+  showConsole();
+
+  const modeLabel = mode === 'full' ? '전체 번역' : '핵심 조항 확인';
+  const fmtLabel  = fmt  === 'word' ? 'Word'      : 'Excel';
+  logMsg(`📋 시작: ${selectedFile.name} / 모드: ${modeLabel} / 형식: ${fmtLabel}`);
+
+  try {
+    // 1) 파일 업로드 + 작업 등록
+    const form = new FormData();
+    form.append('file', selectedFile);
+    form.append('mode', mode);
+    form.append('fmt',  fmt);
+
+    const headers = {};
+    if (accessCode) headers['X-Access-Code'] = accessCode;
+
+    const r = await fetch('/api/translate', { method: 'POST', headers, body: form });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const { job_id } = await r.json();
+    currentJobId = job_id;
+    logMsg(`🔄 작업 등록 완료 (ID: ${job_id.slice(0,8)}…)`);
+
+    // 2) SSE 스트림 구독
+    await listenToJob(job_id);
+
+  } catch (err) {
+    logMsg(`❌ 오류: ${err.message}`, 'error');
+    setBusy(false, 'error');
+  }
+}
+
+function listenToJob(jobId) {
+  return new Promise((resolve) => {
+    const es = new EventSource(`/api/stream/${jobId}`);
+
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'log') {
+          logMsg(msg.text, msg.level || 'info');
+        } else if (msg.type === 'done') {
+          es.close();
+          setBusy(false, 'done');
+          showDownload(msg.filename);
+          resolve();
+        } else if (msg.type === 'error') {
+          es.close();
+          setBusy(false, 'error');
+          resolve();
+        }
+      } catch (_) {}
+    };
+
+    es.onerror = () => {
+      es.close();
+      logMsg('서버 연결이 끊어졌습니다.', 'error');
+      setBusy(false, 'error');
+      resolve();
+    };
+  });
+}
+
+async function downloadFile() {
+  if (!currentJobId) return;
+  try {
+    const r = await fetch(`/api/download/${currentJobId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const name = match ? decodeURIComponent(match[1]) : 'result.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+    logMsg(`📥 다운로드 완료: ${name}`);
+  } catch (err) {
+    logMsg(`❌ 다운로드 오류: ${err.message}`, 'error');
+  }
+}
+
+// ── UI Helpers ────────────────────────────────────────────────────────────────
+function setBusy(on, result) {
+  const btn = document.getElementById('run-btn');
+  const pw  = document.getElementById('prog-wrap');
+  const st  = document.getElementById('console-status');
+  if (on) {
+    btn.className = 'run-btn busy'; btn.textContent = '⏳  처리 중...';
+    pw.classList.add('show'); st.textContent = '● 실행 중';
+  } else {
+    pw.classList.remove('show');
+    if (result === 'done') {
+      btn.className = 'run-btn done'; btn.textContent = '✅  완료 — 다시 실행하려면 클릭';
+      st.textContent = '✓ 완료';
+    } else {
+      btn.className = 'run-btn ready'; btn.textContent = '🚀   번역 시작';
+      st.textContent = result === 'error' ? '✕ 오류' : '';
+    }
+  }
+}
+
+function showConsole() {
+  document.getElementById('console-wrap').classList.add('show');
+}
+
+function showDownload(filename) {
+  const btn  = document.getElementById('dl-btn');
+  const icon = (filename || '').endsWith('.docx') ? '📝' : '📊';
+  btn.textContent = `⬇️  ${icon}  ${filename || 'result'} 다운로드`;
+  btn.classList.add('show');
+}
+</script>
+</body>
+</html>
