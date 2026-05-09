@@ -161,20 +161,30 @@ async def stream_progress(job_id: str):
 # ── 파일 다운로드 ──────────────────────────────────────────────────────────────
 @app.get("/api/download/{job_id}")
 async def download_result(job_id: str):
-    job = JOBS.get(job_id)
-    if not job or job["status"] != "done" or not job.get("file"):
-        raise HTTPException(404, "다운로드할 파일이 없습니다.")
+    try:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, f"job_id '{job_id}' 없음. 서버가 재시작되었을 수 있습니다.")
+        if job["status"] != "done":
+            raise HTTPException(400, f"작업 상태: {job['status']}")
+        if not job.get("file"):
+            raise HTTPException(404, "파일 데이터가 없습니다.")
 
-    mime      = job.get("mime", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    safe_name = quote(job["filename"], safe="")   # 한글 파일명 RFC 5987 인코딩
+        from fastapi.responses import Response
+        mime      = job.get("mime", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        safe_name = quote(job["filename"], safe="")
 
-    return StreamingResponse(
-        io.BytesIO(job["file"]),
-        media_type=mime,
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"
-        },
-    )
+        return Response(
+            content=bytes(job["file"]),
+            media_type=mime,
+           safe_name = quote(job["filename"], safe="")
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"},
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"다운로드 실패: {type(exc).__name__}: {exc}")
 
 
 # ── 번역 실행 (백그라운드 태스크) ─────────────────────────────────────────────
