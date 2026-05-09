@@ -1,15 +1,5 @@
 """
-contract-web / app.py  (v2 — 스레드 안전 버전)
-───────────────────────────────────────────────
-변경사항:
-  - builtins.print 전역 교체 → threading.local 기반 스레드별 stdout 리디렉션
-  - 동시 다중 사용자 안전 (race condition 없음)
-  - 이미지 PDF OCR 진행상황 콘솔에 정확히 표시
-  - 작업 완료 후 30분 지나면 메모리에서 자동 정리
-
-환경변수 (Render Dashboard > Environment):
-  ANTHROPIC_API_KEY   필수
-  ACCESS_CODE         선택 (설정하면 사용자가 코드 입력 필요)
+contract-web / app.py  (v3 — 한글 파일명 다운로드 수정)
 """
 
 import asyncio
@@ -24,6 +14,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,19 +24,15 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).parent))
 import contract_translator as ct
 
-# ── 앱 초기화 ──────────────────────────────────────────────────────────────────
 app = FastAPI(title="계약서 번역기")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
-# 번역은 CPU/IO 집약적이므로 전용 스레드풀 (최대 4개 동시 작업)
 _executor = ThreadPoolExecutor(max_workers=4)
-
-# ── 작업 저장소 ────────────────────────────────────────────────────────────────
 JOBS: dict[str, dict] = {}
 
+
 def _cleanup_old_jobs():
-    """30분 이상 지난 완료 작업 메모리 정리"""
     now = time.time()
     stale = [jid for jid, j in list(JOBS.items())
              if j["status"] in ("done", "error") and now - j["created_at"] > 1800]
@@ -55,7 +42,6 @@ def _cleanup_old_jobs():
 
 # ── 스레드별 stdout 리디렉션 ───────────────────────────────────────────────────
 class _JobStream(io.TextIOBase):
-    """특정 job_id 의 메시지 큐에 print() 출력을 써주는 스트림."""
     def __init__(self, job_id: str):
         self.job_id = job_id
         self._buf   = ""
@@ -80,8 +66,6 @@ class _JobStream(io.TextIOBase):
 
 
 def _run_in_thread(job_id: str, fn):
-    """fn 을 현재 스레드에서 실행하면서 sys.stdout 을 _JobStream 으로 교체.
-    스레드 로컬이므로 다른 스레드의 stdout 에 영향 없음."""
     stream     = _JobStream(job_id)
     old_stdout = sys.stdout
     sys.stdout = stream
@@ -105,8 +89,8 @@ async def health():
 @app.post("/api/translate")
 async def start_translate(
     file: UploadFile = File(...),
-    mode: str = Form("full"),           # "full" | "check"
-    fmt:  str = Form("excel"),          # "excel" | "word"
+    mode: str = Form("full"),
+    fmt:  str = Form("excel"),
     x_access_code: str = Header(default=""),
 ):
     required_code = os.environ.get("ACCESS_CODE", "")
@@ -167,28 +151,29 @@ async def stream_progress(job_id: str):
                 break
             await asyncio.sleep(0.4)
 
-   from urllib.parse import quote
-    safe_name = quote(job["filename"], safe="")
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── 파일 다운로드 ──────────────────────────────────────────────────────────────
+@app.get("/api/download/{job_id}")
+async def download_result(job_id: str):
+    job = JOBS.get(job_id)
+    if not job or job["status"] != "done" or not job.get("file"):
+        raise HTTPException(404, "다운로드할 파일이 없습니다.")
+
+    mime      = job.get("mime", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    safe_name = quote(job["filename"], safe="")   # 한글 파일명 RFC 5987 인코딩
+
     return StreamingResponse(
         io.BytesIO(job["file"]),
         media_type=mime,
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"
         },
-    )
-
-
-# ── Excel 다운로드 ─────────────────────────────────────────────────────────────
-@app.get("/api/download/{job_id}")
-async def download_result(job_id: str):
-    job = JOBS.get(job_id)
-    if not job or job["status"] != "done" or not job.get("file"):
-        raise HTTPException(404, "다운로드할 파일이 없습니다.")
-    mime = job.get("mime", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    return StreamingResponse(
-        io.BytesIO(job["file"]),
-        media_type=mime,
-        headers={"Content-Disposition": f'attachment; filename="{job["filename"]}"'},
     )
 
 
@@ -202,6 +187,7 @@ async def run_translation(
     def push(msg: str, level: str = "info"):
         JOBS[job_id]["messages"].append({"type": "log", "level": level, "text": msg})
 
+    tmp_path = None
     try:
         push("📄 파일 수신 완료 — 텍스트 추출 중...")
 
@@ -217,7 +203,6 @@ async def run_translation(
 
         # 2. 이미지 PDF 감지 → OCR
         is_image_pdf = (ext == ".pdf" and len(text.strip()) < 300)
-
         if is_image_pdf:
             push("🔍 이미지(스캔) PDF 감지 — Claude Vision OCR 시작", "warn")
             push("⏳ 페이지 수에 따라 수분 소요될 수 있습니다...", "warn")
@@ -237,8 +222,7 @@ async def run_translation(
 
         # 3. Claude API 번역
         import anthropic as _ant
-        client = _ant.Anthropic(api_key=api_key)
-
+        client     = _ant.Anthropic(api_key=api_key)
         mode_label = "핵심 조항 분석" if mode == "check" else "전체 번역"
         push(f"🤖 Claude AI {mode_label} 시작...")
         if est_pages > 30:
@@ -261,7 +245,7 @@ async def run_translation(
         fmt_label = "Word" if fmt == "word" else "Excel"
         push(f"📊 번역 완료 — {len(results)}개 조항. {fmt_label} 파일 생성 중...")
 
-        # 4. 파일 저장 (Excel or Word)
+        # 4. 파일 저장
         date_str   = datetime.now().strftime("%Y%m%d_%H%M")
         suffix_str = "_핵심조항" if mode == "check" else "_전체번역"
 
@@ -276,41 +260,27 @@ async def run_translation(
         out_path = Path(tempfile.mktemp(suffix=out_suffix))
 
         if fmt == "word":
-            if mode == "check":
-                await loop.run_in_executor(
-                    _executor,
-                    lambda: _run_in_thread(job_id, lambda: ct.save_key_terms_word(results, out_path, filename))
-                )
-            else:
-                await loop.run_in_executor(
-                    _executor,
-                    lambda: _run_in_thread(job_id, lambda: ct.save_word(results, out_path, filename))
-                )
+            save_fn = ct.save_key_terms_word if mode == "check" else ct.save_word
         else:
-            if mode == "check":
-                await loop.run_in_executor(
-                    _executor,
-                    lambda: _run_in_thread(job_id, lambda: ct.save_key_terms_excel(results, out_path, filename))
-                )
-            else:
-                await loop.run_in_executor(
-                    _executor,
-                    lambda: _run_in_thread(job_id, lambda: ct.save_excel(results, out_path, filename))
-                )
+            save_fn = ct.save_key_terms_excel if mode == "check" else ct.save_excel
+
+        await loop.run_in_executor(
+            _executor,
+            lambda: _run_in_thread(job_id, lambda: save_fn(results, out_path, filename))
+        )
 
         out_bytes = out_path.read_bytes()
         out_path.unlink(missing_ok=True)
-        tmp_path.unlink(missing_ok=True)
 
-        JOBS[job_id].update({"file": out_bytes, "filename": out_name,
-                             "mime": mime_type, "status": "done"})
+        JOBS[job_id].update({
+            "file": out_bytes, "filename": out_name,
+            "mime": mime_type, "status": "done",
+        })
         push(f"✅ 완료! {out_name}  ({len(out_bytes) // 1024:.0f} KB)")
 
     except Exception as exc:
-        try:
+        if tmp_path:
             tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
         JOBS[job_id]["messages"].append(
             {"type": "log", "level": "error", "text": f"❌ 오류: {exc}"}
         )
