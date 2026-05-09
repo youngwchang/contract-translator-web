@@ -493,8 +493,12 @@ async function downloadFile() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const blob = await r.blob();
     const cd = r.headers.get('Content-Disposition') || '';
-    const match = cd.match(/filename="?([^"]+)"?/);
-    const name = match ? decodeURIComponent(match[1]) : 'result.xlsx';
+    // RFC 5987 형식 (filename*=UTF-8''...) 우선 파싱
+    const rfc5987 = cd.match(/filename\*=UTF-8''([^;\s]+)/i);
+    const legacy  = cd.match(/filename="?([^";\s]+)"?/i);
+    const name = rfc5987
+      ? decodeURIComponent(rfc5987[1])
+      : legacy ? legacy[1] : 'result';
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name; a.click();
