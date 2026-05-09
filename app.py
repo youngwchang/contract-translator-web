@@ -167,10 +167,14 @@ async def stream_progress(job_id: str):
                 break
             await asyncio.sleep(0.4)
 
+   from urllib.parse import quote
+    safe_name = quote(job["filename"], safe="")
     return StreamingResponse(
-        generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        io.BytesIO(job["file"]),
+        media_type=mime,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{safe_name}"
+        },
     )
 
 
