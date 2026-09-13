@@ -17,6 +17,7 @@ import os
 import json
 import argparse
 import re
+import time
 import base64
 from pathlib import Path
 from datetime import datetime
@@ -118,7 +119,9 @@ def extract_pdf_ocr(path: Path, client: anthropic.Anthropic) -> str:
     print(f"  → 총 {total_pages}페이지 OCR 처리 예정")
 
     extracted_pages = []
-    BATCH = 4
+    # 계약서 한 페이지는 OCR 출력이 1,500~3,000 토큰이다. 4페이지를 한 번에
+    # 넣으면 max_tokens를 넘겨 뒷페이지가 조용히 잘린다. 2페이지씩 처리한다.
+    BATCH = 2
 
     for start in range(0, total_pages, BATCH):
         end = min(start + BATCH, total_pages)
@@ -127,6 +130,7 @@ def extract_pdf_ocr(path: Path, client: anthropic.Anthropic) -> str:
         content = []
         for pn in range(start, end):
             page = doc[pn]
+            # API가 긴 변 1568px로 리사이즈하므로 그 이상 올려도 토큰만 늘어난다
             pix = page.get_pixmap(dpi=150)
             img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode()
             content.append({"type": "text", "text": f"--- Page {pn + 1} ---"})
@@ -149,12 +153,19 @@ def extract_pdf_ocr(path: Path, client: anthropic.Anthropic) -> str:
             )
         })
 
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=8192,
-            messages=[{"role": "user", "content": content}]
+        msg = _with_retry(
+            lambda: client.messages.create(
+                model=MODEL_MAIN,
+                max_tokens=MAX_TOKENS_OCR,
+                messages=[{"role": "user", "content": content}],
+            ),
+            label=f"OCR {start+1}~{end}p",
         )
-        extracted_pages.append(msg.content[0].text.strip())
+        _record_usage(msg)
+        if msg.stop_reason == "max_tokens":
+            print(f"     [경고] {start+1}~{end}p 응답이 토큰 한도에 걸렸습니다 — "
+                  f"해당 구간 끝부분이 누락될 수 있습니다")
+        extracted_pages.append(_text_of(msg))
 
     doc.close()
     full_text = "\n\n".join(extracted_pages)
@@ -234,25 +245,80 @@ def extract_text(path: Path) -> str:
 
 # ── Claude API 호출 ───────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a professional legal contract analyst and Korean translator specializing in pharmaceutical licensing and distribution agreements.
+MODEL_MAIN  = "claude-sonnet-4-5"   # 번역·분석
+MODEL_LIGHT = "claude-haiku-4-5"    # 용어사전 등 가벼운 작업
 
-Extract every article, clause, section, and provision from the contract. For each one provide:
-1. clause: The identifier (e.g. "Article 1", "Section 2.3", "Schedule A", "Recital", "Definitions")
-2. original: The complete original English text of that clause (verbatim, do not summarize)
-3. korean: A precise, professional Korean translation
+MAX_TOKENS_TRANSLATE = 16000
+MAX_TOKENS_ANALYZE   = 8192
+MAX_TOKENS_OCR       = 16000
 
-Return ONLY a valid JSON array. No markdown fences, no preamble, no explanation.
-Format exactly:
-[{"clause":"Article 1","original":"Full English text...","korean":"정확한 한국어 번역..."}]
+# 한 번의 요청에 담을 원문 분량(자). 한국어 출력은 영문 입력보다 토큰이 촘촘해서
+# 출력 토큰이 입력의 1.5배 안팎이 된다. 12,000자면 출력이 max_tokens 안에 들어온다.
+BATCH_CHARS   = 12000
+MAX_SEG_CHARS = 6000    # 조항 하나가 이보다 길면 문단 단위로 더 쪼갠다
 
-Rules:
-- Include ALL parts: preamble, recitals, definitions, main articles, schedules, appendices, signature blocks
-- Do not merge or split clauses — extract as written
-- Keep subsections (1.1, 1.2...) as separate entries if they have distinct content
-- Translate with legal precision; use standard Korean legal terminology
-- For tables: include table data as part of the relevant clause text
+_USAGE = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
 
-Before finalizing your response, double-check all Korean legal terminology for accuracy and consistency. Verify that pharmaceutical/licensing-specific terms use standard Korean legal expressions (e.g., 라이선스, 독점적 실시권, 계약 해지, 손해배상 등)."""
+
+def reset_usage():
+    for k in _USAGE:
+        _USAGE[k] = 0
+
+
+def get_usage() -> dict:
+    return dict(_USAGE)
+
+
+def _record_usage(message):
+    u = getattr(message, "usage", None)
+    if not u:
+        return
+    _USAGE["calls"] += 1
+    _USAGE["input"]       += getattr(u, "input_tokens", 0) or 0
+    _USAGE["output"]      += getattr(u, "output_tokens", 0) or 0
+    _USAGE["cache_read"]  += getattr(u, "cache_read_input_tokens", 0) or 0
+    _USAGE["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+
+
+def print_usage_summary():
+    u = _USAGE
+    if not u["calls"]:
+        return
+    print(f"  → 토큰 사용량: 호출 {u['calls']}회 | "
+          f"입력 {u['input']:,} (캐시 적중 {u['cache_read']:,}) | 출력 {u['output']:,}")
+
+
+def _text_of(message) -> str:
+    """응답에서 text 블록만 모아 반환 (첫 블록이 text가 아닐 수 있음)"""
+    return "".join(
+        b.text for b in message.content if getattr(b, "type", "") == "text"
+    ).strip()
+
+
+def _strip_fences(raw: str) -> str:
+    raw = re.sub(r'^\s*```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```\s*$', '', raw)
+    return raw.strip()
+
+
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+
+
+def _with_retry(fn, *, tries: int = 4, base: float = 2.0, label: str = ""):
+    """일시적 API 오류(429/5xx/연결)에 지수 백오프 재시도"""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except anthropic.APIStatusError as e:
+            status = getattr(e, "status_code", None)
+            if status not in _RETRYABLE_STATUS or attempt == tries - 1:
+                raise
+        except anthropic.APIConnectionError:
+            if attempt == tries - 1:
+                raise
+        delay = base * (2 ** attempt)
+        print(f"  [재시도] {label} — {delay:.0f}초 후 재시도 ({attempt + 1}/{tries - 1})")
+        time.sleep(delay)
 
 
 def recover_partial_json(raw: str) -> list[dict]:
@@ -264,14 +330,171 @@ def recover_partial_json(raw: str) -> list[dict]:
         if raw[i] == '{':
             try:
                 obj, next_i = decoder.raw_decode(raw, i)
-                if isinstance(obj, dict) and ('clause' in obj or 'category' in obj):
+                if isinstance(obj, dict):
                     results.append(obj)
                 i = next_i
+                continue
             except json.JSONDecodeError:
-                i += 1
-        else:
-            i += 1
+                pass
+        i += 1
     return results
+
+
+def _parse_json_array(raw: str, label: str = "") -> list[dict]:
+    raw = _strip_fences(raw)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    recovered = recover_partial_json(raw)
+    if recovered:
+        print(f"  [경고] JSON이 온전하지 않아 부분 복구했습니다{label}: {len(recovered)}건")
+    return recovered
+
+
+# ── 조항 분할 (로컬) ──────────────────────────────────────────────────────────
+#
+# 예전에는 Claude에게 원문(original)까지 되돌려 달라고 했다. 원문은 이미 우리가
+# 갖고 있는 텍스트라 출력 토큰을 그대로 두 배로 쓰는 셈이었고, 8192 토큰 한도를
+# 넘겨 응답이 잘리는 일이 잦았다. 이제 조항 분할은 파이썬이 하고, 모델에게는
+# 한국어 번역만 받는다. 원문은 로컬 텍스트를 그대로 쓰므로 축약될 여지도 없다.
+
+_CLAUSE_HEAD = re.compile(
+    r'^[ \t]*('
+    r'ARTICLE\s+[IVXLC]+|Article\s+[IVXLC]+'
+    r'|ARTICLE\s+\d+(?:\.\d+)*|Article\s+\d+(?:\.\d+)*'
+    r'|SECTION\s+\d+(?:\.\d+)*|Section\s+\d+(?:\.\d+)*'
+    r'|CLAUSE\s+\d+(?:\.\d+)*|Clause\s+\d+(?:\.\d+)*'
+    r'|SCHEDULE\s+[A-Z0-9]+|Schedule\s+[A-Z0-9]+'
+    r'|EXHIBIT\s+[A-Z0-9]+|Exhibit\s+[A-Z0-9]+'
+    r'|APPENDIX\s+[A-Z0-9]+|Appendix\s+[A-Z0-9]+'
+    r'|ANNEX\s+[A-Z0-9]+|Annex\s+[A-Z0-9]+'
+    r'|\d{1,2}\.\d{1,2}(?:\.\d{1,2})*'
+    r'|\d{1,2}\.(?=\s+[A-Z])'
+    r'|RECITALS?|WITNESSETH|NOW,?\s+THEREFORE|IN\s+WITNESS\s+WHEREOF'
+    r')\b',
+    re.MULTILINE,
+)
+
+
+def _split_oversized(label: str, body: str) -> list[dict]:
+    """긴 조항을 문단 경계로 나눠 (1/3), (2/3) 라벨을 붙인다"""
+    if len(body) <= MAX_SEG_CHARS:
+        return [{"clause": label, "original": body}]
+
+    paras = body.split("\n\n")
+    pieces, cur = [], ""
+    for p in paras:
+        if len(cur) + len(p) + 2 > MAX_SEG_CHARS and cur:
+            pieces.append(cur.strip())
+            cur = p
+        else:
+            cur = f"{cur}\n\n{p}" if cur else p
+    if cur.strip():
+        pieces.append(cur.strip())
+
+    # 문단이 하나뿐이라 여전히 큰 경우 강제로 자른다
+    final = []
+    for piece in pieces:
+        if len(piece) <= MAX_SEG_CHARS:
+            final.append(piece)
+        else:
+            for i in range(0, len(piece), MAX_SEG_CHARS):
+                final.append(piece[i:i + MAX_SEG_CHARS])
+
+    total = len(final)
+    return [{"clause": f"{label} ({i}/{total})" if total > 1 else label,
+             "original": piece}
+            for i, piece in enumerate(final, 1)]
+
+
+def segment_clauses(text: str) -> list[dict]:
+    """계약서를 조항 단위로 분할 → [{"clause": "Article 3", "original": "..."}]"""
+    matches = list(_CLAUSE_HEAD.finditer(text))
+    segments: list[dict] = []
+
+    if len(matches) >= 3:
+        head = text[:matches[0].start()].strip()
+        if len(head) > 40:
+            segments.extend(_split_oversized("Preamble", head))
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[m.start():end].strip()
+            if len(body) < 15:
+                continue
+            segments.extend(_split_oversized(m.group(1).strip(), body))
+    else:
+        # 조항 번호가 없는 문서 — 문단 묶음으로 대체
+        print("  → 조항 번호를 찾지 못해 문단 단위로 분할합니다")
+        paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+        cur = ""
+        idx = 1
+        for p in paras:
+            if len(cur) + len(p) + 2 > MAX_SEG_CHARS and cur:
+                segments.append({"clause": f"Part {idx}", "original": cur.strip()})
+                idx += 1
+                cur = p
+            else:
+                cur = f"{cur}\n\n{p}" if cur else p
+        if cur.strip():
+            segments.append({"clause": f"Part {idx}", "original": cur.strip()})
+
+    print(f"  → {len(segments)}개 조항으로 분할 완료")
+    return segments
+
+
+def _batch_segments(segments: list[dict], max_chars: int = BATCH_CHARS) -> list[list[int]]:
+    """세그먼트 인덱스를 요청 단위로 묶는다"""
+    batches, cur, size = [], [], 0
+    for i, seg in enumerate(segments):
+        n = len(seg["original"])
+        if cur and size + n > max_chars:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append(i)
+        size += n
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+# ── 번역 프롬프트 ─────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are a professional Korean legal translator specializing in pharmaceutical licensing, supply and distribution agreements.
+
+You receive numbered clauses from an English contract. Translate each clause into Korean.
+
+Return ONLY a valid JSON array — no markdown fences, no preamble, no explanation.
+Format exactly:
+[{"id":1,"korean":"..."},{"id":2,"korean":"..."}]
+
+Rules:
+- Output one object per input id. Never merge, split, skip or reorder ids.
+- Do NOT echo the English source. Only "id" and "korean".
+- Translate the entire clause including sub-items, provisos and table rows. Do not summarize or omit.
+- Preserve the source's numbering, indentation and line breaks inside the Korean text.
+- Leave party names, product names, defined terms in parentheses on first use, e.g. 순매출액(Net Sales).
+- Keep figures, dates, currencies, percentages and units exactly as written.
+- Use standard Korean legal terminology (예: 독점적 실시권, 중대한 위반, 손해배상, 해지, 진술 및 보장)."""
+
+
+def format_glossary_for_prompt(glossary: list[dict]) -> str:
+    """용어 사전을 system prompt에 주입할 형식으로 변환"""
+    if not glossary:
+        return ""
+    lines = [
+        "",
+        "=== MANDATORY TERMINOLOGY (use these Korean translations consistently) ===",
+    ]
+    for term in glossary:
+        en = (term.get("english") or "").strip()
+        ko = (term.get("korean") or "").strip()
+        if en and ko:
+            lines.append(f'  "{en}" -> "{ko}"')
+    lines.append("=== END TERMINOLOGY ===")
+    return "\n".join(lines)
 
 
 GLOSSARY_SYSTEM_PROMPT = """You are a legal terminology specialist for pharmaceutical licensing and distribution contracts.
@@ -285,54 +508,48 @@ Rules:
 - Include only terms that (a) appear MULTIPLE TIMES, or (b) are capitalized defined terms (e.g., "the Product", "Net Sales"), or (c) are critical legal/business concepts
 - Use standard Korean legal and pharmaceutical terminology
 - Maximum 50 most important terms — prioritize defined terms and recurring legal phrases
-- Examples to look for:
-  • Parties: Licensor, Licensee, Distributor, Manufacturer, Supplier
-  • Product/territory: Product, Territory, Field, Indication
-  • Financial: Net Sales, Royalty, Milestone Payment, Minimum Purchase Quantity, Transfer Price
-  • Time/term: Initial Term, Renewal Term, Notice Period, Effective Date
-  • IP: Patent Rights, Know-How, Trademark, Confidential Information
-  • Termination: Material Breach, Change of Control, Cure Period
+- Look for: Licensor/Licensee/Distributor; Product/Territory/Field/Indication;
+  Net Sales/Royalty/Milestone/Minimum Purchase Quantity/Transfer Price;
+  Initial Term/Renewal Term/Notice Period/Effective Date;
+  Patent Rights/Know-How/Trademark/Confidential Information;
+  Material Breach/Change of Control/Cure Period
 
 Return ONLY a valid JSON array. No markdown fences, no preamble.
 Format: [{"english":"Minimum Purchase Quantity","korean":"최소구매수량","category":"재무"}]"""
 
 
+def _sample_head_tail(text: str, max_chars: int) -> str:
+    """정의는 앞쪽, 해지·의무는 뒤쪽에 몰린다 — 양끝을 함께 샘플링"""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return text[:half] + "\n\n[... 중략 ...]\n\n" + text[-half:]
+
+
 def extract_glossary(client: anthropic.Anthropic, text: str) -> list[dict]:
     """청크 분할 번역 시 용어 일관성을 위해 핵심 용어 사전을 추출"""
-    print("  → 핵심 용어 사전 추출 중 (청크 간 일관된 번역을 위해)...")
-
-    # 정의는 앞쪽, 핵심 의무는 뒤쪽에 주로 등장 → 양쪽을 샘플링
-    MAX_CHARS = 80000
-    if len(text) > MAX_CHARS:
-        half = MAX_CHARS // 2
-        sample = text[:half] + "\n\n[... 중략 ...]\n\n" + text[-half:]
-    else:
-        sample = text
+    print("  → 핵심 용어 사전 추출 중 (조항 간 번역 일관성 확보)...")
+    sample = _sample_head_tail(text, 80000)
 
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=4096,
-            system=GLOSSARY_SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Contract text:\n\n{sample}\n\nExtract glossary as a JSON array."
-            }]
+        message = _with_retry(
+            lambda: client.messages.create(
+                model=MODEL_LIGHT,
+                max_tokens=4096,
+                system=GLOSSARY_SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Contract text:\n\n{sample}\n\nExtract glossary as a JSON array."
+                }],
+            ),
+            label="용어사전",
         )
-        raw = message.content[0].text.strip()
-        raw = re.sub(r'^```json\s*', '', raw)
-        raw = re.sub(r'^```\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-        glossary = json.loads(raw.strip())
-        if not isinstance(glossary, list):
-            raise ValueError("응답이 리스트 형식이 아닙니다")
+        _record_usage(message)
+        glossary = _parse_json_array(_text_of(message), " (용어사전)")
+        glossary = [t for t in glossary if t.get("english") and t.get("korean")]
         print(f"  → {len(glossary)}개 핵심 용어 추출 완료")
-        # 미리보기 (상위 8개)
         for term in glossary[:8]:
-            en = term.get("english", "")
-            ko = term.get("korean", "")
-            if en and ko:
-                print(f"     · {en} → {ko}")
+            print(f"     · {term['english']} → {term['korean']}")
         if len(glossary) > 8:
             print(f"     · ... 외 {len(glossary) - 8}개")
         return glossary
@@ -341,119 +558,95 @@ def extract_glossary(client: anthropic.Anthropic, text: str) -> list[dict]:
         return []
 
 
-def format_glossary_for_prompt(glossary: list[dict]) -> str:
-    """용어 사전을 system prompt에 주입할 형식으로 변환"""
-    if not glossary:
-        return ""
-    lines = [
-        "",
-        "=== MANDATORY TERMINOLOGY (use these Korean translations consistently) ===",
-        "When you encounter any of these English terms, translate them using EXACTLY the Korean equivalent below. Do not paraphrase or vary the translation.",
-        "",
-    ]
-    for term in glossary:
-        en = (term.get("english") or "").strip()
-        ko = (term.get("korean") or "").strip()
-        if en and ko:
-            lines.append(f'  • "{en}" → "{ko}"')
-    lines.append("=== END TERMINOLOGY ===")
-    return "\n".join(lines)
-
-
-def chunk_text(text: str, max_chars: int = 15000) -> list[str]:
-    """긴 계약서를 청크로 분할 (조항 경계 기준, 기본 15000자)"""
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks = []
-    current = ""
-    splitter = re.compile(r'(?=\b(?:Article|Section|ARTICLE|SECTION|Clause|CLAUSE)\s+\d)', re.IGNORECASE)
-    parts = splitter.split(text)
-
-    for part in parts:
-        if len(current) + len(part) > max_chars and current:
-            chunks.append(current.strip())
-            current = part
-        else:
-            current += "\n" + part
-
-    if current.strip():
-        chunks.append(current.strip())
-
-    print(f"  → 계약서가 길어 {len(chunks)}개 청크로 분할 처리합니다")
-    return chunks
-
-
-def call_api(client: anthropic.Anthropic, text: str, chunk_index: int = 0, total_chunks: int = 1, glossary: list[dict] | None = None) -> list[dict]:
-    """Claude API 호출 → 조항 리스트 반환 (잘린 응답 복구 포함)"""
-    suffix = f" (청크 {chunk_index+1}/{total_chunks})" if total_chunks > 1 else ""
-    print(f"  → Claude API 호출 중{suffix}...")
-
-    user_content = f"Contract text:\n\n{text}\n\nExtract all clauses and return as a JSON array."
-    if total_chunks > 1:
-        user_content = (
-            f"[This is part {chunk_index+1} of {total_chunks} of a large contract.]\n\n"
-            + user_content
-        )
-
-    system_prompt = SYSTEM_PROMPT + format_glossary_for_prompt(glossary or [])
-
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=8192,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_content}]
+def _translate_batch(client: anthropic.Anthropic, segments: list[dict],
+                     idxs: list[int], system_blocks: list[dict],
+                     label: str) -> dict[int, str]:
+    """세그먼트 묶음 하나를 번역 → {세그먼트 인덱스: 한국어}"""
+    payload = "\n\n".join(
+        f"<clause id=\"{i}\" ref=\"{segments[i]['clause']}\">\n{segments[i]['original']}\n</clause>"
+        for i in idxs
     )
+    user = (f"Translate the following {len(idxs)} clauses into Korean. "
+            f"Return a JSON array with one object per id.\n\n{payload}")
 
-    raw = message.content[0].text.strip()
-    stop_reason = message.stop_reason
+    message = _with_retry(
+        lambda: client.messages.create(
+            model=MODEL_MAIN,
+            max_tokens=MAX_TOKENS_TRANSLATE,
+            system=system_blocks,
+            messages=[{"role": "user", "content": user}],
+        ),
+        label=label,
+    )
+    _record_usage(message)
 
-    # 마크다운 펜스 제거
-    raw = re.sub(r'^```json\s*', '', raw)
-    raw = re.sub(r'^```\s*', '', raw)
-    raw = re.sub(r'\s*```$', '', raw)
-    raw = raw.strip()
+    out: dict[int, str] = {}
+    for item in _parse_json_array(_text_of(message), f" {label}"):
+        try:
+            sid = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        ko = (item.get("korean") or "").strip()
+        if sid in idxs and ko:
+            out[sid] = ko
 
-    # 정상 파싱 시도
-    try:
-        result = json.loads(raw)
-        print(f"  → {len(result)}개 조항 추출 완료{suffix}")
-        return result
-    except json.JSONDecodeError:
-        pass
-
-    # 응답이 max_tokens로 잘린 경우 부분 복구
-    if stop_reason == "max_tokens":
-        print(f"  [경고] 응답이 토큰 한도로 잘렸습니다{suffix}. 완성된 조항만 저장합니다.")
-        recovered = recover_partial_json(raw)
-        print(f"  → 부분 복구: {len(recovered)}개 조항{suffix}")
-        return recovered
-
-    # 기타 파싱 실패
-    print(f"  [경고] JSON 파싱 실패{suffix}. 부분 복구를 시도합니다.")
-    recovered = recover_partial_json(raw)
-    if recovered:
-        print(f"  → 부분 복구: {len(recovered)}개 조항{suffix}")
-        return recovered
-
-    print(f"  응답 미리보기: {raw[:200]}...")
-    return []
+    # 응답이 토큰 한도로 잘렸고 빠진 조항이 있으면 절반으로 나눠 재시도
+    missing = [i for i in idxs if i not in out]
+    if missing and message.stop_reason == "max_tokens" and len(idxs) > 1:
+        print(f"  [알림] {label} 응답이 길어 {len(missing)}개 조항을 나눠 다시 요청합니다")
+        mid = len(missing) // 2 or 1
+        for part in (missing[:mid], missing[mid:]):
+            if part:
+                out.update(_translate_batch(client, segments, part, system_blocks, label))
+    return out
 
 
 def translate_contract(client: anthropic.Anthropic, text: str) -> list[dict]:
-    """전체 계약서 번역 처리 (청크 분할 + 용어 일관성 글로서리)"""
-    chunks = chunk_text(text)
+    """전체 계약서 번역 — 로컬 조항 분할 + 용어 일관성 글로서리 + 프롬프트 캐싱"""
+    segments = segment_clauses(text)
+    if not segments:
+        return []
 
-    # 청크가 2개 이상일 때만 글로서리를 추출 (단일 청크는 자체적으로 일관됨)
-    glossary = []
-    if len(chunks) > 1:
-        glossary = extract_glossary(client, text)
+    batches = _batch_segments(segments)
 
-    all_results = []
-    for i, chunk in enumerate(chunks):
-        results = call_api(client, chunk, i, len(chunks), glossary=glossary)
-        all_results.extend(results)
-    return all_results
+    glossary = extract_glossary(client, text) if len(batches) > 1 else []
+
+    # system 프롬프트는 모든 요청에서 동일하므로 캐싱한다.
+    # 요청이 2회 이상이면 두 번째부터 입력 토큰의 90%를 절약한다.
+    system_text = SYSTEM_PROMPT + format_glossary_for_prompt(glossary)
+    system_blocks = [{"type": "text", "text": system_text}]
+    if len(batches) > 1:
+        system_blocks[0]["cache_control"] = {"type": "ephemeral"}
+
+    if len(batches) > 1:
+        print(f"  → {len(batches)}회 요청으로 나눠 번역합니다")
+
+    translations: dict[int, str] = {}
+    for bi, idxs in enumerate(batches, 1):
+        label = f"({bi}/{len(batches)})" if len(batches) > 1 else ""
+        print(f"  → Claude 번역 중 {label} — 조항 {len(idxs)}개")
+        try:
+            translations.update(
+                _translate_batch(client, segments, idxs, system_blocks, label)
+            )
+        except Exception as e:
+            print(f"  [경고] 번역 실패 {label}: {e}")
+
+    results = []
+    for i, seg in enumerate(segments):
+        ko = translations.get(i, "")
+        if not ko:
+            ko = "[번역 실패 — 원문을 확인해주세요]"
+        results.append({
+            "clause":   seg["clause"],
+            "original": seg["original"],
+            "korean":   ko,
+        })
+
+    done = sum(1 for r in results if not r["korean"].startswith("[번역 실패"))
+    print(f"  → 번역 완료: {done}/{len(results)}개 조항")
+    print_usage_summary()
+    return results
 
 
 # ── Excel 저장 ────────────────────────────────────────────────────────────────
@@ -624,41 +817,39 @@ Return ONLY a valid JSON array. No markdown, no preamble."""
 
 
 def analyze_key_terms(client: anthropic.Anthropic, text: str) -> list[dict]:
-    """계약 핵심 조항 분석 (계약기간·해지 관련) — 단일 API 호출"""
+    """계약 핵심 조항 분석 (계약기간·갱신·해지) — 출력이 짧아 단일 호출"""
     print("  → 핵심 조항 추출 중 (계약기간, 갱신, 해지)...")
 
-    # 전체 문서를 한 번에 전송 (출력이 짧으므로 입력이 길어도 무방)
+    # 해지·통보 조항은 계약서 뒤쪽에 몰린다. 앞부분만 자르면 찾으려는 내용을
+    # 그대로 버리게 되므로 앞뒤를 함께 넣는다.
     MAX_CHARS = 120000
     if len(text) > MAX_CHARS:
-        print(f"  → 문서가 길어 앞부분 {MAX_CHARS//1000}K자 기준으로 분석합니다")
-        text = text[:MAX_CHARS]
-
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=8192,
-        system=KEY_TERMS_SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"Contract text:\n\n{text}\n\nExtract all key terms as a JSON array."
-        }]
-    )
-
-    raw = message.content[0].text.strip()
-    raw = re.sub(r'^```json\s*', '', raw)
-    raw = re.sub(r'^```\s*', '', raw)
-    raw = re.sub(r'\s*```$', '', raw)
+        print(f"  → 문서가 길어 앞뒤 각 {MAX_CHARS // 2000}K자를 함께 분석합니다")
+    body = _sample_head_tail(text, MAX_CHARS)
 
     try:
-        result = json.loads(raw.strip())
-        print(f"  → {len(result)}개 핵심 조항 추출 완료")
-        return result
-    except json.JSONDecodeError:
-        recovered = recover_partial_json(raw)
-        if recovered:
-            print(f"  → 부분 복구: {len(recovered)}개 조항")
-            return recovered
-        print(f"  [경고] 파싱 실패. 응답 미리보기: {raw[:300]}")
+        message = _with_retry(
+            lambda: client.messages.create(
+                model=MODEL_MAIN,
+                max_tokens=MAX_TOKENS_ANALYZE,
+                system=KEY_TERMS_SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Contract text:\n\n{body}\n\nExtract all key terms as a JSON array."
+                }],
+            ),
+            label="핵심조항",
+        )
+    except Exception as e:
+        print(f"  [오류] 핵심 조항 분석 실패: {e}")
         return []
+
+    _record_usage(message)
+    results = [r for r in _parse_json_array(_text_of(message), " (핵심조항)")
+               if r.get("category") or r.get("item")]
+    print(f"  → {len(results)}개 핵심 조항 추출 완료")
+    print_usage_summary()
+    return results
 
 
 # 카테고리별 색상
