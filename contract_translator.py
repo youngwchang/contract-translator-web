@@ -130,8 +130,13 @@ def extract_pdf_ocr(path: Path, client: anthropic.Anthropic) -> str:
         content = []
         for pn in range(start, end):
             page = doc[pn]
-            # API가 긴 변 1568px로 리사이즈하므로 그 이상 올려도 토큰만 늘어난다
-            pix = page.get_pixmap(dpi=150)
+            # 이미지 토큰 ≈ (가로×세로)/750. API 는 긴 변 1568px 로 축소하므로
+            # 그 이상 올려도 토큰만 늘고, 낮추면 그만큼 선형으로 줄어든다.
+            # OCR_LONG_EDGE 로 조절 (기본 1568 = 최대 화질, 1200 이면 약 40% 절감)
+            long_edge = int(os.environ.get("OCR_LONG_EDGE", "1568"))
+            rect = page.rect
+            zoom = long_edge / max(rect.width, rect.height)
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode()
             content.append({"type": "text", "text": f"--- Page {pn + 1} ---"})
             content.append({
@@ -254,7 +259,7 @@ MAX_TOKENS_OCR       = 16000
 
 # 한 번의 요청에 담을 원문 분량(자). 한국어 출력은 영문 입력보다 토큰이 촘촘해서
 # 출력 토큰이 입력의 1.5배 안팎이 된다. 12,000자면 출력이 max_tokens 안에 들어온다.
-BATCH_CHARS   = 12000
+BATCH_CHARS   = 18000   # 호출 수를 줄여 system 재전송·JSON 오버헤드를 아낀다
 MAX_SEG_CHARS = 6000    # 조항 하나가 이보다 길면 문단 단위로 더 쪼갠다
 
 _USAGE = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "calls": 0}
@@ -518,6 +523,83 @@ Return ONLY a valid JSON array. No markdown fences, no preamble.
 Format: [{"english":"Minimum Purchase Quantity","korean":"최소구매수량","category":"재무"}]"""
 
 
+# check 모드가 찾는 것은 계약기간·갱신·해지뿐이다. 계약서 전체를 보낼 이유가 없다.
+_KEY_TERMS_KEYWORDS = [
+    # 기간·갱신
+    "term of this agreement", "initial term", "renewal term",
+    "effective date", "effective as of", "commencement", "survive", "survival",
+    "expire", "expiration", "renew", "auto-renew", "automatically renew",
+    "extend", "extension", "anniversary",
+    # 해지
+    "terminat",            # terminate / termination / terminates
+    "cancel", "rescind", "wind-down", "wind down", "survival",
+    # 통보
+    "notice", "notices", "notify", "notification", "in writing", "writing",
+    # 해지 사유
+    "material breach", "breach", "default", "cure period", "remedy",
+    "insolven", "bankrupt", "liquidation", "receivership",
+    "minimum purchase", "minimum annual", "failure to meet",
+    "change of control", "force majeure",
+    "regulatory approval", "marketing authorization", "withdraw",
+]
+
+def _score_segment(seg_text: str) -> int:
+    """조항이 핵심 조항 분석과 얼마나 관련 있는지 점수화"""
+    low = seg_text.lower()
+    return sum(low.count(k) for k in _KEY_TERMS_KEYWORDS)
+
+
+def _select_key_clauses(text: str, budget: int) -> tuple[str, dict]:
+    """
+    관련 조항만 추려 예산(자) 안에서 돌려준다.
+    추출이 부실하면 기존 방식(앞뒤 샘플링)으로 자동 폴백한다.
+    """
+    segments = segment_clauses(text)
+    scored = [(i, _score_segment(sg["original"]), sg) for i, sg in enumerate(segments)]
+    hits = [x for x in scored if x[1] > 0]
+
+    # 조항 분할 자체가 실패했거나 관련 조항을 못 찾은 경우에만 폴백한다.
+    # 해지 조항은 짧은 경우가 많으므로 분량으로 판단하지 않는다.
+    if len(segments) < 3 or len(hits) < 2:
+        return _sample_head_tail(text, budget), {"mode": "fallback", "kept": 0, "total": len(segments)}
+
+    # 점수 높은 순으로 예산까지 담고, 원문 순서로 되돌린다
+    hits.sort(key=lambda x: (-x[1], len(x[2]["original"])))
+    chosen, used = [], 0
+    picked = set()
+    for idx, sc, sg in hits:
+        L = len(sg["original"])
+        if used + L > budget:
+            continue
+        chosen.append((idx, sg)); picked.add(idx); used += L
+
+    # 조항이 잘려 맥락이 끊기는 것을 막기 위해 앞뒤 한 칸씩 함께 담는다
+    for idx in sorted(picked):
+        for nb in (idx - 1, idx + 1):
+            if nb in picked or not (0 <= nb < len(segments)):
+                continue
+            sg = segments[nb]
+            L = len(sg["original"])
+            if L <= 3000 and used + L <= budget:
+                chosen.append((nb, sg)); picked.add(nb); used += L
+    if not chosen:
+        return _sample_head_tail(text, budget), {"mode": "fallback", "kept": 0, "total": len(segments)}
+
+    # 서문(계약일·당사자)과 마지막 조항(서명·잔존)은 점수와 무관하게 확보한다
+    have = {i for i, _ in chosen}
+    for must in (0, len(segments) - 1):
+        if must not in have and 0 <= must < len(segments):
+            sg = segments[must]
+            if len(sg["original"]) <= 4000:
+                chosen.append((must, sg))
+                used += len(sg["original"])
+
+    chosen.sort(key=lambda x: x[0])
+    body = "\n\n".join(f"[{sg['clause']}]\n{sg['original']}" for _, sg in chosen)
+    return body, {"mode": "filtered", "kept": len(chosen), "total": len(segments),
+                  "chars": used, "orig_chars": len(text)}
+
+
 def _sample_head_tail(text: str, max_chars: int) -> str:
     """정의는 앞쪽, 해지·의무는 뒤쪽에 몰린다 — 양끝을 함께 샘플링"""
     if len(text) <= max_chars:
@@ -526,10 +608,24 @@ def _sample_head_tail(text: str, max_chars: int) -> str:
     return text[:half] + "\n\n[... 중략 ...]\n\n" + text[-half:]
 
 
+def _definitions_sample(text: str, budget: int) -> str:
+    """정의(Definitions) 조항을 우선 담고 남는 예산만 앞뒤 샘플로 채운다"""
+    segments = segment_clauses(text)
+    defs = [sg["original"] for sg in segments
+            if "definition" in sg["clause"].lower()
+            or "definition" in sg["original"][:200].lower()]
+    head = "\n\n".join(defs)[:budget]
+    rest = budget - len(head)
+    if rest > 2000:
+        head += "\n\n[... 본문 발췌 ...]\n\n" + _sample_head_tail(text, rest)
+    return head if head.strip() else _sample_head_tail(text, budget)
+
+
 def extract_glossary(client: anthropic.Anthropic, text: str) -> list[dict]:
     """청크 분할 번역 시 용어 일관성을 위해 핵심 용어 사전을 추출"""
     print("  → 핵심 용어 사전 추출 중 (조항 간 번역 일관성 확보)...")
-    sample = _sample_head_tail(text, 80000)
+    # 정의 조항에 용어가 몰려 있다. 전체를 보내는 대신 정의 조항 + 축약 샘플만 보낸다.
+    sample = _definitions_sample(text, 40000)
 
     try:
         message = _with_retry(
@@ -820,12 +916,16 @@ def analyze_key_terms(client: anthropic.Anthropic, text: str) -> list[dict]:
     """계약 핵심 조항 분석 (계약기간·갱신·해지) — 출력이 짧아 단일 호출"""
     print("  → 핵심 조항 추출 중 (계약기간, 갱신, 해지)...")
 
-    # 해지·통보 조항은 계약서 뒤쪽에 몰린다. 앞부분만 자르면 찾으려는 내용을
-    # 그대로 버리게 되므로 앞뒤를 함께 넣는다.
-    MAX_CHARS = 120000
-    if len(text) > MAX_CHARS:
-        print(f"  → 문서가 길어 앞뒤 각 {MAX_CHARS // 2000}K자를 함께 분석합니다")
-    body = _sample_head_tail(text, MAX_CHARS)
+    # 계약서 전체를 보내는 대신 기간·갱신·해지 관련 조항만 골라 보낸다.
+    # (추출이 부실하면 앞뒤 샘플링으로 자동 폴백)
+    BUDGET = 45000
+    body, info = _select_key_clauses(text, BUDGET)
+    if info["mode"] == "filtered":
+        saved = 1 - info["chars"] / max(min(len(text), 120000), 1)
+        print(f"  → 관련 조항 {info['kept']}/{info['total']}개만 전송 "
+              f"({info['chars']:,}자 · 기존 대비 {saved*100:.0f}% 절감)")
+    else:
+        print("  → 조항 추출이 어려워 앞뒤 샘플링으로 분석합니다")
 
     try:
         message = _with_retry(
